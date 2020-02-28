@@ -25,6 +25,7 @@ ifeq ($(CC), clang)
 		CFLAGS += --target=i686-pc-windows-gnu
 		BITS = 32
 endif
+	EXT = .exe
 	LDFLAGS = -lws2_32 -ladvapi32 -s
 endif
 
@@ -37,10 +38,10 @@ all: mdns dyndns-cli
 
 #main: $(OBJS)
 mdns: mdns.o log.o net.o dnsdb.o dnsproto.o dyndns.o getopt.o winsvr.o md5.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@$(EXT) $^ $(LDFLAGS)
 
 dyndns-cli: dyndns-cli.c net.o md5.o log.o getopt.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@$(EXT) $^ $(LDFLAGS)
 
 # test: test.o log.o dnsdb.o
 # 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -48,4 +49,4 @@ dyndns-cli: dyndns-cli.c net.o md5.o log.o getopt.o
 # 	cmd /c test.exe
 
 clean:
-	rm *.o
+	rm -f *.o mdns$(EXT) dyndns-cli$(EXT) mdns.log

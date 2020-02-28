@@ -180,7 +180,8 @@ int main(int argc, char **argv) {
 		return -1;
 
 	// 如果参数是显示帮助
-	if (g_conf.help) {
+	if (g_conf.help || !g_conf.server[0]
+			|| !g_conf.host[0] || !g_conf.key[0]) {
 		usage();
 		return 0;
 	}

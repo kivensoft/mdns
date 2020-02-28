@@ -24,6 +24,7 @@ static unsigned long g_log_cur_size;
 /** 当前日志级别 */
 static unsigned g_log_level = LOG_DEBUG;
 static char g_log_levels[][9] = { "[DEBUG] ", "[INFO ] ", "[WARN ] ", "[ERROR] " };
+static const char HEX[] = "0123456789abcdef";
 
 void log_set_level(unsigned level) {
 	g_log_level = level;
@@ -162,19 +163,16 @@ void log_dump_hex(const char *title, const void *data, size_t size) {
 	log_write(title, strlen(title));
 	log_putc('\n');
 
-	const char *p = data, *pe = data + size;
 	char buf[LOG_HEX_LINE]; // 一行hex显示格式所需大小
 	memset(buf, ' ', LOG_HEX_LINE);
 	buf[LOG_HEX_LINE - 1] = '\n';
 
-	while (p < pe) {
-		int pos = 4, max_pos = LOG_HEX_LINE - 3;
+	for (const char *p = data, *pe = data + size; p < pe;) {
+		int pos = 4;
 		// 按一行输出
-		while (p < pe && pos < max_pos) {
-			unsigned char c = *p++;
-			unsigned int n1 = c >> 4, n2 = c & 0xF;
-			buf[pos++] = n1 + (n1 < 10 ? 48 : 55);
-			buf[pos++] = n2 + (n2 < 10 ? 48 : 55);
+		for (; p < pe && pos < LOG_HEX_LINE; ++p) {
+			buf[pos++] = HEX[*p >> 4];
+			buf[pos++] = HEX[*p & 0xf];
 			++pos;
 		}
 		buf[pos - 1] = '\n';

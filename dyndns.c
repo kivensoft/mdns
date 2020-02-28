@@ -17,6 +17,8 @@
 #define DD_IP_MAX 15
 #define DD_MAX_LEN (DD_MIN_LEN + DD_HOST_MAX + DD_IP_MAX)
 
+typedef enum { CHK_OK, TIME_INVALID, SIGN_INVALID } chk_err_t;
+
 typedef struct {
 	char time[DD_TIME_LEN + 1];
 	char md5[DD_MD5_LEN + 1];
@@ -62,13 +64,13 @@ inline static bool _dyndns_chk_valid(const char *src, size_t src_len) {
 			&& src[DD_MIN_LEN] != 0);
 }
 
-static bool _dyndns_chk_sign(const dyndns_request_t* req) {
+static chk_err_t _dyndns_chk_sign(const dyndns_request_t* req) {
 	// 时间校验, 正负10分钟内都算有效
 	time_t now = time(NULL);
 	time_t cmp = (time_t) req->time_num;
 	if (cmp < now - 600 || cmp > now + 600) {
 		log_warn("dyndns request error: time invalid!");
-		return false;
+		return TIME_INVALID;
 	}
 
 	// md5签名校验
@@ -83,10 +85,10 @@ static bool _dyndns_chk_sign(const dyndns_request_t* req) {
 	md5_string(sign, buf, buf_len);
 	if (0 != strcmp(req->md5, sign)) {
 		log_warn("dyndns request error: md5 sign invalid!");
-		return false;
+		return SIGN_INVALID;
 	}
 
-	return true;
+	return CHK_OK;
 }
 
 /** 解析请求内容, 按协议解析到dst中 */
@@ -177,15 +179,21 @@ int dyndns(const struct sockaddr_in *addr, const char *msg, size_t msg_size,
 	_dyndns_dump(msg, msg_size, &req);
 
 	// 校验时间和MD5是否正确
-	if (false == _dyndns_chk_sign(&req))
-		return 0;
+	chk_err_t _chk_err;
+	if (CHK_OK != (_chk_err = _dyndns_chk_sign(&req))) {
+		if (TIME_INVALID == _chk_err)
+			strcpy(reply, "error invalid time.");
+		else
+			strcpy(reply, "error invalid sign.");
+	} else {
+		const char *p;
+		if (g_dyndns_upd_func && g_dyndns_upd_func(req.host, req.ip_num))
+			p = req.ip;
+		else
+			p = g_zero_ip;
 
-	const char *p;
-	if (g_dyndns_upd_func && g_dyndns_upd_func(req.host, req.ip_num))
-		p = req.ip;
-	else
-		p = g_zero_ip;
-	sprintf(reply, "%s %s", req.host, p);
+		sprintf(reply, "ok %s %s", req.host, p);
+	}
 
 	log_debug("dyndns reply: %s", reply);
 	return strlen(reply);
