@@ -190,8 +190,8 @@ int run() {
 	while (1) {
 		recv_count = recvfrom(fd, g_recv, sizeof(g_recv), 0, (sockaddr_t *) &addr, &addrlen);
 		if (recv_count <= 0) {
-			log_debug("udp connection terminate");
-			break;
+			log_debug("udp recive count is 0, ignore");
+			continue;
 		}
 
 		if (debug)
