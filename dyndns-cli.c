@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -41,7 +42,7 @@ config_t g_conf = { .port = 53,
 
 char g_buf[512];
 
-inline static const char* _b2s(bool b) {
+inline static const char* b2s(bool b) {
 	return b ? "true" : "false";
 }
 
@@ -70,7 +71,7 @@ static void usage() {
 	printf("Usage: %s [OPTION]... -k <key> -h <host> -s <server>\n", APP);
 	printf("dynamic dns update client, version 1.3, copyleft by kivensoft 2017-2020.\n\n");
 	printf("Options:\n");
-	printf("  -d                    enabled logger mode, default %s\n", _b2s(g_conf.debug));
+	printf("  -d                    enabled logger mode, default %s\n", b2s(g_conf.debug));
 	printf("  -g <log filename>     log file name, default %s\n", g_conf.logfile);
 	printf("  -h <host>             dynamic update domain name, example: user.myip.com\n");
 	printf("  -i <ip>               ip address for update, default auto detect\n");
@@ -133,7 +134,7 @@ static bool parse_cmd_line(int argc, char **argv, config_t *dst) {
 	return true;
 }
 
-static size_t _mk_dyndns_req() {
+static size_t mk_dyndns_req() {
 	char buf[512], *p = buf, *b = g_buf, digest[33];
 	memcpy(p, MAGIC, sizeof(MAGIC));
 	memcpy(b, MAGIC, sizeof(MAGIC));
@@ -186,12 +187,11 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 	// windows平台初始化winsocket
-	if (!init_socket())
-		return -1;
+	socket_init();
 
 	// 配置日志
 	if (g_conf.debug)
-		log_set_file(g_conf.logfile, 1024 * 1024);
+		log_start(g_conf.logfile, 1024 * 1024);
 
 	// 创建socket
 	socket_t fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
 	}
 
 	// 设置读取超时时间
-	sock_recv_timeout(fd, 5);
+	socket_recv_timeout(fd, 5);
 
 	// 设置对端网络地址与端口
 	unsigned long ip = inet_addr(g_conf.server);
@@ -211,19 +211,19 @@ int main(int argc, char **argv) {
 		.sin_port = htons(g_conf.port)};
 	socklen_t addrlen = sizeof(addr);
 
-	int count = _mk_dyndns_req();
+	int count = mk_dyndns_req();
 	// 发送数据
 	count = sendto(fd, g_buf, count, 0, (sockaddr_t *) &addr, addrlen);
 	g_buf[count] = 0;
 	log_debug("send data: %s", g_buf);
 	// 读取服务器响应
 	count = recvfrom(fd, g_buf, sizeof(g_buf), 0, (sockaddr_t *) &addr, &addrlen);
-	close_socket(fd);
+	socket_close(fd);
 	if (count < 0) {
 		log_debug("udp connection timeout");
 		return 0;
 	}
-	log_dump_text("recv data: ", g_buf, count);
+	log_text(LOG_DEBUG, "recv data: ", g_buf, count);
 
 	return 0;
 }

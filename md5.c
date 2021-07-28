@@ -1,5 +1,4 @@
 #include <string.h>
-#include <stddef.h>
 #include "md5.h"
 
 /*md5转换用到的常量，算法本身规定的*/
@@ -12,9 +11,6 @@ enum MD5_CONST {
  * 需要填充的bits的最大值为512=64*8 。
  */
 static uint8_t PADDING[64] = { 0x80 };
-		// 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		// 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		// 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 static char HEX[] = "0123456789abcdef";
 
@@ -157,31 +153,40 @@ static void _md5_transform (uint32_t state[4], uint8_t block[64]) {
 	memset(x, 0, sizeof(x));
 }
 
-static void _md5_init(MD5 *this) {
-	// 将当前的有效信息的长度设成0,这个很简单,还没有有效信息,长度当然是0了
-	this->count[0] = this->count[1] = 0;
- 
-	// Load magic initialization constants.
-	// 初始化链接变量，算法要求这样，这个没法解释了
-	this->state[0] = 0x67452301;
-	this->state[1] = 0xefcdab89;
-	this->state[2] = 0x98badcfe;
-	this->state[3] = 0x10325476;
+inline static size_t _to_hex(char *dst, const void *src, size_t srclen) {
+	for (int i = 0; i < srclen; ++i, dst += 2) {
+		uint8_t c = ((uint8_t*)src)[i];
+		dst[0] = HEX[c >> 4];
+		dst[1] = HEX[c & 15];
+	}
+	return srclen << 1;
 }
 
-static void _md5_update (MD5 *this, const void *input, size_t len) {
-	uint32_t i, index, part_len;
+void md5_init(md5_ctx_t* md5) {
+	memset(md5, 0, sizeof(*md5));
+	// Load magic initialization constants.
+	// 初始化链接变量，算法要求这样，这个没法解释了
+	uint32_t *state = md5->state;
+	state[0] = 0x67452301;
+	state[1] = 0xefcdab89;
+	state[2] = 0x98badcfe;
+	state[3] = 0x10325476;
+}
+
+void md5_update (md5_ctx_t* md5, const void *input, size_t len) {
+	uint32_t i, index, part_len, *count = md5->count, *state = md5->state;
+	uint8_t *buffer = md5->buffer;
  
 	// Compute number of bytes mod 64
 	// 计算已有信息的bits长度的字节数的模64, 64bytes=512bits。
 	// 用于判断已有信息加上当前传过来的信息的总长度能不能达到512bits，
 	// 如果能够达到则对凑够的512bits进行一次处理
-	index = (this->count[0] >> 3) & 0x3F;
+	index = (count[0] >> 3) & 0x3F;
  
 	/* Update number of bits *//*更新已有信息的bits长度*/
-	if((this->count[0] += len << 3) < len << 3)
-		this->count[1]++;
-	this->count[1] += len >> 29;
+	if((count[0] += len << 3) < len << 3)
+		count[1]++;
+	count[1] += len >> 29;
  
 	// 计算已有的字节数长度还差多少字节可以 凑成64的整倍数
 	part_len = 64 - index;
@@ -189,24 +194,24 @@ static void _md5_update (MD5 *this, const void *input, size_t len) {
 	// Transform as many times as possible.
 	// 如果当前输入的字节数 大于 已有字节数长度补足64字节整倍数所差的字节数
 	if(len >= part_len) {
-		// 用当前输入的内容把this->buffer的内容补足512bits
-		memcpy(&this->buffer[index], input, part_len);
-		// 用基本函数对填充满的512bits（已经保存到this->buffer中） 做一次转换，转换结果保存到context->state中
-		_md5_transform(this->state, this->buffer);
+		// 用当前输入的内容把md5->buffer的内容补足512bits
+		memcpy(&buffer[index], input, part_len);
+		// 用基本函数对填充满的512bits（已经保存到md5->buffer中） 做一次转换，转换结果保存到context->state中
+		_md5_transform(state, buffer);
  
 		// 对当前输入的剩余字节做转换（如果剩余的字节<在输入的input缓冲区中>大于512bits的话 ），
-		// 转换结果保存到this->state中
+		// 转换结果保存到md5->state中
 		// 把i+63<inputlen改为i+64<=inputlen更容易理解
 		for(i = part_len; i + 63 < len; i += 64 )
-			_md5_transform(this->state, (uint8_t*)(input + i));
+			_md5_transform(state, (uint8_t*)(input + i));
  
 		index = 0;
 	} else
 		i = 0;
  
 	// Buffer remaining input
-	// 将输入缓冲区中的不足填充满512bits的剩余内容填充到this->buffer中，留待以后再作处理
-	memcpy(&this->buffer[index], (uint8_t*)(input + i), len - i);
+	// 将输入缓冲区中的不足填充满512bits的剩余内容填充到md5->buffer中，留待以后再作处理
+	memcpy(&buffer[index], (uint8_t*)(input + i), len - i);
 }
 
 /** MD5 finalization. Ends an MD5 message-digest operation, writing the
@@ -215,59 +220,46 @@ static void _md5_update (MD5 *this, const void *input, size_t len) {
  * @param this：你前面初始化并填入了信息的md5结构
  * @param digest：保存最终的加密串
  */
-static void _md5_final (MD5 *this, uint8_t digest[16]) {
+void md5_final (md5_ctx_t* md5, uint8_t digest[16]) {
 	uint8_t bits[8];
 	uint32_t index, pad_len;
 
 	// Save number of bits
 	// 将要被转换的信息(所有的)的bits长度拷贝到bits中
-	_encode(bits, this->count, 8);
+	_encode(bits, md5->count, 8);
 
 	// Pad out to 56 mod 64.
 	// 计算所有的bits长度的字节数的模64, 64bytes=512bits
-	index = (this->count[0] >> 3) & 0x3f;
+	index = (md5->count[0] >> 3) & 0x3f;
 	// 计算需要填充的字节数，pad_len的取值范围在1-64之间
 	pad_len = (index < 56) ? (56 - index) : (120 - index);
 	// 这一次函数调用绝对不会再导致MD5Transform的被调用，因为这一次不会填满512bits
-	_md5_update(this, PADDING, pad_len);
+	md5_update(md5, PADDING, pad_len);
 
 	// Append length (before padding)
 	// 补上原始信息的bits长度（bits长度固定的用64bits表示），这一次能够恰巧凑够512bits，不会多也不会少
-	_md5_update(this, bits, 8);
+	md5_update(md5, bits, 8);
 
 	// Store state in digest
 	// 将最终的结果保存到digest中。ok，终于大功告成了
-	_encode(digest, this->state, 16);
+	_encode(digest, md5->state, 16);
 
 	// Zeroize sensitive information.
-	memset(this, 0, sizeof(*this) - offsetof(MD5, init));
+	memset(md5, 0, sizeof(*md5));
 }
 
-void md5_create(MD5 *this) {
-	// 初始化成员函数指针
-	this->init = _md5_init;
-	this->update = _md5_update;
-	this->final = _md5_final;
-	_md5_init(this);
+uint8_t* md5_bin(uint8_t dst[16], const void *input, size_t len) {
+	md5_ctx_t md5;
+	md5_init(&md5);
+	md5_update(&md5, input, len);
+	md5_final(&md5, dst);
+	return dst;
 }
 
 char* md5_string(char dst[33], const void *input, size_t len) {
 	uint8_t digest[16];
-	MD5 md5;
-
-	_md5_init(&md5);
-	_md5_update(&md5, input, len);
-	_md5_final(&md5, digest);
-	to_hex(dst, 33, digest, sizeof(digest));
-	dst[32] = '\0';
+	md5_bin(digest, input, len);
+	size_t count = _to_hex(dst, digest, sizeof(digest));
+	dst[count] = '\0';
 	return dst;
-}
-
-int to_hex(char *dst, size_t dstlen, const void *src, size_t srclen) {
-	if (dstlen >> 1 < srclen) return 0;
-	for (int i = 0; i < srclen; ++i) {
-		*dst++ = HEX[*(uint8_t*)(src + i) >> 4];
-		*dst++ = HEX[*(uint8_t*)(src + i) &0xf];
-	}
-	return srclen << 1;
 }

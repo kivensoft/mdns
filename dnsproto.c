@@ -1,122 +1,97 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <inttypes.h>
 #include "log.h"
 #include "dnsproto.h"
 
-#define DOMAIN_NAME_MAX 64
 #define DNS_HEAD_LEN 12
 #define TTL 60
 
+typedef const uint8_t* pcuint8_t;
+
 // dns查询类型定义
-#define DNS_QT_A        1
-#define DNS_QT_NS       2
-#define DNS_QT_CNAME    5
-#define DNS_QT_PTR      12
-#define DNS_QT_MX       15
-#define DNS_QT_AAAA     28
+enum dns_qt_t {
+	DNS_QT_A = 1,
+	DNS_QT_NS = 2,
+	DNS_QT_CNAME = 5,
+	DNS_QT_PTR = 12,
+	DNS_QT_MX = 15,
+	DNS_QT_AAAA = 28
+};
 
 // dns返回码定义
-#define DNS_RCODE_OK          0
-#define DNS_RCODE_SVR_FAILURE 2
-#define DNS_RCODE_NAME_ERROR  3
+enum dns_rcode_t {
+	DNS_RCODE_OK = 0,
+	DNS_RCODE_QUERY_ERROR = 1,
+	DNS_RCODE_SVR_FAILURE = 2,
+	DNS_RCODE_NAME_ERROR = 3
+};
 
 /** dns查询问题结构 */
-typedef struct {
-	uint16_t offset;              // 域名在报文中的偏移地址(从0开始计算)
-	uint16_t type;                // 查询类型
-	uint16_t class;               // 查询类, 通常为1, 固定为internet类
-	char name[DOMAIN_NAME_MAX];   // 域名
+typedef struct dns_query_t {
+	uint32_t	ip;					// 查询结果，记录到此
+	uint16_t	offset;				// 查询在请求报文中的偏移地址，用于创建应答报文时的地址引用
+	uint16_t	type;              	// 查询类型
+	uint16_t	class;             	// 查询类, 通常为1, 固定为internet类
+	char 		host[HOST_MAX];   	// 域名
 } dns_query_t;
 
-static dns_find_func g_dns_find_func = (dns_find_func) NULL;
+static uint32_t (*g_dns_find_func) (const char* host) = NULL;
 
-void dns_init(dns_find_func func) {
-	g_dns_find_func = func;
-}
-
-/** 创建dns响应报文的头部
- * @param reply 响应报文地址
- * @param msg 请求报文地址
- * @param rcode 响应报文的返回码值
- * @param ancount 响应报文的回答区域数量
-*/
-static void _dns_build_header(uint8_t *reply, const uint8_t *msg, uint16_t rcode, uint16_t ancount) {
-	// 保留0,1,4,5字节与请求内容一致
-	memcpy(reply, msg, 6);
-
-	// 保留opcode, 设置响应标志(QR)及授权回答标志(AA)
-	reply[2] = (msg[2] & 0x78) | 0x84;	 // 01111000 | 10000100
-	// 设置返回码
-	reply[3] = rcode;
-
-	// 设置回答区域数量
-	*(uint16_t*)(reply + 6) = htons(ancount);
-
-	// 授权区域数量与附加区域数量均设置为0
-	memset(reply + 8, 0, 4);
-}
-
-/** 把查询内容复制到响应报文中 */
-inline static bool _dns_build_queries(uint8_t *reply, size_t reply_size, const uint8_t *msg, size_t msg_size) {
-	if (reply_size < msg_size) return false;
-	memcpy(reply + DNS_HEAD_LEN, msg + DNS_HEAD_LEN, msg_size - DNS_HEAD_LEN);
-	return true;
-}
-
-/** 创建一个域名错误的回答 */
-inline static size_t _dns_build_reply(uint8_t *reply, size_t reply_size,
-		const uint8_t *msg, size_t msg_size, uint16_t rcode) {
-	_dns_build_header(reply, msg, rcode, 0);
-	_dns_build_queries(reply, reply_size, msg, msg_size);
-	return msg_size;
+void dns_init(uint32_t (*find_func) (const char* host)) {
+	g_dns_find_func = find_func;
 }
 
 /** 校验报文长度是否有效, 最小需要12个字节以上 */
-inline static bool _dns_len_valid(size_t len) {
-	return len > DNS_HEAD_LEN;
-}
+inline static bool dns_check_len(size_t len) { return len > DNS_HEAD_LEN; }
 
-/** 校验报文是否dns查询报文, 0:查询, 1:响应 */
-inline static bool _dns_is_query(const uint8_t *data) {
-	return (data[2] & 0x80) == 0;
-}
+/** 校验报文是否dns查询报文, 0: 查询, 1: 响应 */
+inline static unsigned dns_get_query(pcuint8_t req) { return ((req[2] >> 7) & 0x1); }
 
 /** 获取报文操作码, 4位, 0:标准查询, 1:反向查询, 2: 服务器状态请求 */
-inline static unsigned _dns_opcode(const uint8_t *data) {
-	return (data[2] >> 3) & 0xf;
-}
+inline static unsigned dns_get_opcode(pcuint8_t req) { return (req[2] >> 3) & 0xF; }
 
 /** 获取报文要查询的域名数量 */
-inline static uint16_t _dns_questions(const uint8_t *data) {
-	return ntohs(*((uint16_t*)(data + 4)));
-}
+inline static unsigned dns_get_questions(pcuint8_t req) { return ntohs(*(uint16_t*)(req + 4)); }
 
 /** 读取dns请求的queries查询区域
  * @param data 要读取起始地址(非报文起始地址, 第一次读取, 应该是queries区域的起始地址)
- * @param max data最大可读取数量
+ * @param data_end 结尾地址，即允许读取的最大地址加1
  * @param dst 回写域名查询请求结构地址
  * @return 返回data的下一次读取地址, 返回NULL表示读取失败, 可能是格式有误或其它错误
  */
-static const uint8_t* _dns_queries(const uint8_t *data, const uint8_t *data_end, dns_query_t *dst) {
-	int max = data_end - data;
-	char *p = dst->name;
-	uint8_t len, total = 0, first = 1;
-	while(data < data_end && (len = *data++) != 0) {
-		total += len + 1;
-		// 域名超过64个字符, 报错退出函数
-		if (total > DOMAIN_NAME_MAX || total > max) {
-			log_debug("read dns queries fail: too long");
+static const uint8_t* dns_get_queries(pcuint8_t data, pcuint8_t data_end, dns_query_t *dst) {
+	// 传入参数错误
+	if (data >= data_end) {
+		log_warn("%s error: data[%" PRIxPTR "] >= data_end[%" PRIxPTR "]!", __func__, data, data_end);
+		return NULL; 
+	}
+
+	size_t pos = 0, len;
+	char *host = dst->host;
+
+	while (data < data_end && pos < HOST_MAX - 1) {
+		// 读取域名分段长度
+		len = (size_t)(*data++);
+		
+		// 读取到长度为0，表明域名读取结束
+		if (!len) {
+			// 最后一个字符是'.'，改成0
+			host[pos - 1] = '\0';
+			break;
+		}
+		
+		// 域名长度超出报文长度，读取失败
+		if (data + len > data_end) {
+			log_warn("%s error: read domain name error, prefix len[%u] invalid!", __func__, (uint32_t)len);
 			return NULL;
 		}
-		if (first) first = 0;
-		else *p++ = '.';
-		// 复制分段的域名内容
-		memcpy(p, data, len);
-		data += len;
-		p += len ;
+
+		// 将分段域名写入host
+		while (len--) host[pos++] = *data++;
+		host[pos++] = '.';
 	}
-	*p = '\0';
 
 	// 读取查询类型type和查询类class
 	dst->type = ntohs(*(uint16_t*)data);
@@ -125,15 +100,58 @@ static const uint8_t* _dns_queries(const uint8_t *data, const uint8_t *data_end,
 	return data + 4;
 }
 
+/** 创建dns响应报文的头部, 共12个字节
+ * @param res 响应报文地址
+ * @param req 请求报文地址
+ * @param rcode 响应报文的返回码值
+ * @param ancount 响应报文的回答区域数量
+*/
+static void dns_build_header(pcuint8_t req, uint8_t *res, uint16_t rcode, uint16_t ancount) {
+	// 头部12字节清零
+	*(uint64_t*)res = 0, *(uint32_t*)(res + 8) = 0;
+
+	// 0,1 两字节为id，从请求中获取
+	*(uint16_t*)res = *(const uint16_t*)req;
+
+	// 2,3 两字节为标志位，设置为(高位到低位) QR(1)_0000_AA(1)_00_0000_RCODE(4)
+	// QR: 0: 查询, 1: 应答, AA 1: 授权回答, 0: 非授权回答,  RCODE 响应码
+	*(res + 2) = 0x84; // 0x84 = 10000100, 应答报文，且是授权应答
+	*(res + 3) = (uint8_t) rcode;
+
+	// 4,5,6,7,8,9,10,11为4个两字节长度的（请求、回答、授权、附加）数量
+	*(uint16_t*)(res + 4) = *(const uint16_t*)(req + 4);
+	*(uint16_t*)(res + 6) = htons(ancount);
+}
+
+/** 把查询内容写入到响应报文中, 返回写入查询内容后的总报文长度 */
+static uint16_t dns_copy_queries(pcuint8_t req, uint8_t *res) {
+	uint16_t count = (uint16_t) dns_get_questions(req), pos = DNS_HEAD_LEN;
+	while (count--) {
+		while ((res[pos] = req[pos]))
+			for (uint16_t len = req[pos++], max = pos + len; pos < max; ++pos)
+				res[pos] = req[pos];
+		pos++;
+		*(uint32_t*)(res + pos) = *(uint32_t*)(req + pos);
+		pos += 4;
+	}
+	return pos;
+}
+
+/** 创建一个域名错误的回答, 返回生成的报文长度 */
+inline static uint16_t dns_build_fail(pcuint8_t req, uint8_t* res, uint16_t rcode) {
+	dns_build_header(req, res, rcode, 0);
+	return dns_copy_queries(req, res);
+}
+
 /** 构建一个查询响应内容
  * @param reply 写入响应内容的起始地址
  * @param reply_end 最大可写入的结束地址
  * @param query 查询问题结构
  * @param ip 写入的响应ip地址
- * @return 下一次写入地址, 如果写入失败, 返回null, 通常是因为空间不足
+ * @return 写入长度
  */
-static uint8_t* _dns_build_answer(uint8_t *data, uint8_t *data_end, const dns_query_t *query, uint32_t ip) {
-	if (data_end - data < 16) return NULL;
+static uint16_t dns_build_answer(uint8_t *data, uint8_t *data_end, const dns_query_t *query) {
+	if (data_end - data < 16) return 0;
 	uint16_t off = query->offset | 0xC000; // 1100_0000_0000_0000
 	*(uint16_t*)(data) = htons(off);
 	*(uint16_t*)(data + 2) = htons(query->type);
@@ -142,71 +160,69 @@ static uint8_t* _dns_build_answer(uint8_t *data, uint8_t *data_end, const dns_qu
 
 	*(data + 10) = 0;
 	*(data + 11) = 4;
-	*(uint32_t*)(data + 12) = ip;
-	return data + 16;
+	*(uint32_t*)(data + 12) = query->ip;
+	return 16;
 }
 
-int dns_process(const void *msg, size_t msg_size, void *reply, size_t reply_size) {
-	// 长度错误或者非查询请求 忽略
-	if (!_dns_len_valid(msg_size) || !_dns_is_query(msg)) {
-		log_debug("dns request length[%d] too small.", msg_size);
+uint16_t dns_process(const void *req, size_t req_size, uint8_t res[DNS_PACKET_MAX]) {
+	// 判断报文长度
+	if (!dns_check_len(req_size)) {
+		log_warn("dns request length[%" PRIu64 "] too small!", (uint64_t)req_size);
+		return 0;
+	}
+
+	// 获取报文类型，判断是否查询请求, 0: 查询, 1: 响应
+	if (dns_get_query(req)) {
+		log_warn("dns request not query type!");
 		return 0;
 	}
 
 	// 获取操作码, 0: 标准查询, 1: 反向查询, 2: 服务器状态请求
-	int opcode = _dns_opcode(msg);
+	unsigned opcode = dns_get_opcode(req);
 	if (opcode > 1) {
-		log_debug("dns request opcode[%d] unsupport.", opcode);
+		log_warn("dns request opcode[%d] unsupport!", opcode);
 		return 0;
 	}
 
 	// 获取查询数量, 当前暂时只支持1个域名的查询, 一次性查多个域名暂不支持
-	int questions = _dns_questions(msg);
+	int questions = dns_get_questions(req);
 	if (questions != 1) {
-		log_debug("dns request questions[%d] unsupport.", questions);
-		return _dns_build_reply(reply, reply_size, msg, msg_size, DNS_RCODE_NAME_ERROR);
+		log_warn("dns request multiple questions[%u] unsupport!", questions);
+		return dns_build_fail(req, res, DNS_RCODE_NAME_ERROR);
 	}
 
 	// 解析查询请求
 	const uint8_t *rp;
-	dns_query_t quer;
-	quer.offset = DNS_HEAD_LEN; //rp - (uint8_t*) msg;
-	rp = _dns_queries(msg + DNS_HEAD_LEN, msg + msg_size, &quer);
+	dns_query_t quer = {.offset = DNS_HEAD_LEN, .ip = INADDR_NONE};
+	rp = dns_get_queries(req + DNS_HEAD_LEN, req + req_size, &quer);
 	if (rp == NULL) {
-		log_debug("dns request queries format error");
-		return _dns_build_reply(reply, reply_size, msg, msg_size, DNS_RCODE_NAME_ERROR);
+		log_warn("dns request queries format error!");
+		return dns_build_fail(req, res, DNS_RCODE_NAME_ERROR);
 	}
 	// 解析查询请求中的域名信息错误或者请求的查询类型不是ipv4地址解析类型
 	if (quer.type != DNS_QT_A) {
-		log_debug("dns request query type unsupport: %s [type=%d,class=%d]",
-				quer.name, quer.type, quer.class);
-		return _dns_build_reply(reply, reply_size, msg, msg_size, DNS_RCODE_NAME_ERROR);
+		log_warn("dns request query type unsupport: %s [type=%u,class=%u]",
+				quer.host, quer.type, quer.class);
+		return dns_build_fail(req, res, DNS_RCODE_NAME_ERROR);
 	}
-	log_debug("dns request query: %s [type=%d, class=%d]",
-			quer.name, quer.type, quer.class);
+	log_debug("dns request query: %s [type=%u, class=%u]", quer.host, quer.type, quer.class);
 
 	// 对成功解析的请求进行响应
-	uint8_t *wp;
-	uint32_t ip = g_dns_find_func(quer.name);
-	if (ip == 0) {
-		log_debug("dns can't find %s ip", quer.name);
-		return _dns_build_reply(reply, reply_size, msg, msg_size, DNS_RCODE_NAME_ERROR);
+	quer.ip = g_dns_find_func(quer.host);
+	if (quer.ip == INADDR_NONE) {
+		log_warn("dns query result: can't find %s", quer.host);
+		return dns_build_fail(req, res, DNS_RCODE_NAME_ERROR);
 	}
-	wp = _dns_build_answer(reply + msg_size, reply + reply_size, &quer, ip);
-	if (wp == NULL) {
-		log_debug("dns answer write reply memory no enough.");
-		return _dns_build_reply(reply, reply_size, msg, msg_size, DNS_RCODE_SVR_FAILURE);
+
+	// 生成应答包
+	dns_build_header(req, res, 0, 1);
+	uint16_t hlen = dns_copy_queries(req, res);
+	uint16_t alen = dns_build_answer(res + hlen, res + DNS_PACKET_MAX - hlen, &quer);
+	if (!alen) {
+		log_warn("dns answer write res memory no enough.");
+		return dns_build_fail(req, res, DNS_RCODE_SVR_FAILURE);
 	}
-	#ifndef NLOG
-		struct in_addr addr;
-		addr.s_addr = ip;
-		log_debug("dns anwser: %s -> %s", quer.name, inet_ntoa(addr));
-	#endif
+	log_debug("dns anwser: %s -> %s", quer.host, net_ip_tostring(quer.ip));
 
-	// 构建响应头
-	_dns_build_header(reply, msg, DNS_RCODE_OK, (uint16_t) 1);
-	// 构建响应内容的请求部分
-	_dns_build_queries(reply, reply_size, msg, msg_size);
-
-	return wp - (uint8_t*) reply;
+	return hlen + alen;
 }

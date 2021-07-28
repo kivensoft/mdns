@@ -165,7 +165,7 @@ int dyndns(const struct sockaddr_in *addr, const char *msg, size_t msg_size,
 	if (!_dyndns_chk_magic(msg, msg_size))
 		return -1;
 
-	log_dump_text("recv dynamic dns update request: ", msg, msg_size);
+	log_text(LOG_TRACE, "recv dynamic dns update request: ", msg, msg_size);
 	// 有效标志头, 但内容无效或参数无效, 返回0, 表示抛弃该消息
 	if (!_dyndns_chk_valid(msg, msg_size)
 			|| reply_size < DD_HOST_MAX + DD_IP_MAX + 2) {
